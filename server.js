@@ -1,0 +1,352 @@
+require('dotenv').config();
+const express = require('express');
+const cookieParser = require('cookie-parser');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
+const http = require('http');
+const { Server } = require('socket.io');
+
+const PORT = Number(process.env.PORT) || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const JWT_SECRET = process.env.JWT_SECRET || (IS_PRODUCTION ? null : 'dev-only-secret-change-me');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (IS_PRODUCTION ? null : 'admin021');
+const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
+const DB_PATH = path.join(DATA_DIR, 'db.json');
+
+if (!JWT_SECRET) throw new Error('JWT_SECRET precisa ser definido em produção.');
+if (!ADMIN_PASSWORD) throw new Error('ADMIN_PASSWORD precisa ser definido em produção.');
+
+function emptyDB() {
+  return { users: {}, threads: [], messages: {} };
+}
+
+function normalizeDB(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    users: source.users && typeof source.users === 'object' ? source.users : {},
+    threads: Array.isArray(source.threads) ? source.threads : [],
+    messages: source.messages && typeof source.messages === 'object' ? source.messages : {},
+  };
+}
+
+function loadDB() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(DB_PATH)) return emptyDB();
+  try {
+    return normalizeDB(JSON.parse(fs.readFileSync(DB_PATH, 'utf8')));
+  } catch (error) {
+    console.error('Falha ao ler db.json; iniciando um banco novo:', error.message);
+    return emptyDB();
+  }
+}
+
+let db = loadDB();
+let writeQueue = Promise.resolve();
+let bootstrapPromise = null;
+
+function saveDB() {
+  writeQueue = writeQueue.then(async () => {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const tempPath = DB_PATH + '.tmp';
+    await fs.promises.writeFile(tempPath, JSON.stringify(db, null, 2));
+    await fs.promises.rename(tempPath, DB_PATH);
+  });
+  return writeQueue;
+}
+
+async function ensureAdmin() {
+  const admin = db.users.admin;
+  if (admin && admin.passwordHash) return;
+  db.users.admin = {
+    username: 'admin',
+    name: 'Administrador',
+    role: 'admin',
+    passwordHash: bcrypt.hashSync(ADMIN_PASSWORD, 10),
+    createdAt: admin?.createdAt || Date.now(),
+  };
+  await saveDB();
+  console.log('Usuário admin disponível. Defina ADMIN_PASSWORD no ambiente para escolher a senha.');
+}
+
+function cookieOptions(maxAge) {
+  return {
+    maxAge,
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+    path: '/',
+  };
+}
+
+function guestCookieOptions() {
+  return {
+    maxAge: 1000 * 60 * 60 * 24 * 365,
+    httpOnly: false,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+    path: '/',
+  };
+}
+
+/* ---------------- app / http / socket.io ---------------- */
+const app = express();
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '20kb' }));
+app.use(cookieParser());
+app.use(express.static(path.join(__dirname, 'public')));
+
+const server = http.createServer(app);
+const io = new Server(server);
+
+/* ---------------- helpers de autenticação ---------------- */
+function signToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '30d' });
+}
+
+function getAuthUser(req) {
+  const token = req.cookies?.token;
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
+function ensureGuestId(req, res) {
+  let gid = req.cookies?.guestId;
+  if (!gid || !/^visitante-[a-f0-9]{8}$/.test(gid)) {
+    gid = 'visitante-' + crypto.randomBytes(4).toString('hex');
+    res.cookie('guestId', gid, guestCookieOptions());
+  }
+  return gid;
+}
+
+function cleanText(value, maxLength) {
+  return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
+}
+
+function validateSignup(body) {
+  const name = cleanText(body?.name, 80);
+  const username = cleanText(body?.username, 24).toLowerCase();
+  const email = cleanText(body?.email, 160).toLowerCase();
+  const password = typeof body?.password === 'string' ? body.password : '';
+
+  if (name.length < 2) return { error: 'Informe seu nome completo.' };
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) {
+    return { error: 'O usuário deve ter de 3 a 24 caracteres: letras, números ou _.', username };
+  }
+  if (password.length < 6 || password.length > 128) {
+    return { error: 'A senha deve ter entre 6 e 128 caracteres.', username };
+  }
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { error: 'Informe um e-mail válido.', username };
+  }
+  return { name, username, email, password };
+}
+
+function canAccessThread(req, threadId) {
+  const auth = getAuthUser(req);
+  if (auth?.role === 'admin') return true;
+  if (auth?.username === threadId) return true;
+  return Boolean(req.cookies?.guestId && req.cookies.guestId === threadId);
+}
+
+function parseCookieHeader(header) {
+  const cookies = {};
+  for (const item of String(header || '').split(';')) {
+    const index = item.indexOf('=');
+    if (index < 0) continue;
+    const key = item.slice(0, index).trim();
+    const value = item.slice(index + 1).trim();
+    if (key) cookies[key] = decodeURIComponent(value);
+  }
+  return cookies;
+}
+
+function getSocketIdentity(socket) {
+  const cookies = parseCookieHeader(socket.handshake.headers.cookie);
+  let auth = null;
+  if (cookies.token) {
+    try { auth = jwt.verify(cookies.token, JWT_SECRET); } catch { /* token inválido */ }
+  }
+  return { auth, guestId: cookies.guestId || null };
+}
+
+function canSocketAccess(socket, threadId) {
+  const { auth, guestId } = socket.data.identity;
+  return auth?.role === 'admin' || auth?.username === threadId || guestId === threadId;
+}
+
+/* ---------------- rotas de saúde e autenticação ---------------- */
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
+app.post('/api/auth/signup', async (req, res, next) => {
+  try {
+    const input = validateSignup(req.body || {});
+    if (input.error) return res.status(400).json({ error: input.error });
+    if (input.username === 'admin') return res.status(400).json({ error: 'Esse usuário não está disponível.' });
+    if (db.users[input.username]) return res.status(409).json({ error: 'Esse usuário já existe. Tente outro.' });
+
+    db.users[input.username] = {
+      username: input.username,
+      name: input.name,
+      email: input.email,
+      passwordHash: bcrypt.hashSync(input.password, 10),
+      role: 'client',
+      createdAt: Date.now(),
+    };
+
+    if (!db.threads.some((thread) => thread.id === input.username)) {
+      db.threads.push({ id: input.username, name: input.name, kind: 'client' });
+    }
+
+    const guestId = req.cookies?.guestId;
+    const history = guestId && Array.isArray(db.messages[guestId]) ? db.messages[guestId].slice() : [];
+    history.push({
+      from: 'admin',
+      text: `Olá, ${input.name}! Bem-vindo(a) à 021 TV. Qualquer dúvida sobre planos ou canais, é só chamar por aqui.`,
+      ts: Date.now(),
+    });
+    db.messages[input.username] = history;
+
+    if (guestId && guestId !== input.username) {
+      delete db.messages[guestId];
+      db.threads = db.threads.filter((thread) => thread.id !== guestId);
+    }
+
+    await saveDB();
+    res.cookie('token', signToken({ username: input.username, role: 'client' }), cookieOptions(1000 * 60 * 60 * 24 * 30));
+    res.json({ username: input.username, name: input.name, role: 'client' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const username = cleanText(req.body?.username, 24).toLowerCase();
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const user = db.users[username];
+  if (!user || !user.passwordHash || !bcrypt.compareSync(password, user.passwordHash)) {
+    return res.status(401).json({ error: 'Usuário ou senha incorretos.' });
+  }
+  res.cookie('token', signToken({ username: user.username, role: user.role }), cookieOptions(1000 * 60 * 60 * 24 * 30));
+  res.json({ username: user.username, name: user.name, role: user.role });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token', cookieOptions(0));
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const auth = getAuthUser(req);
+  const user = auth && db.users[auth.username];
+  if (!user) return res.json({ user: null });
+  res.json({ user: { username: user.username, name: user.name, role: user.role } });
+});
+
+app.get('/api/guest', (req, res) => {
+  res.json({ guestId: ensureGuestId(req, res) });
+});
+
+/* ---------------- rotas de chat ---------------- */
+app.get('/api/chat/:id', (req, res) => {
+  const id = cleanText(req.params.id, 80);
+  if (!canAccessThread(req, id)) return res.status(403).json({ error: 'Sem acesso a essa conversa.' });
+  res.json({ messages: Array.isArray(db.messages[id]) ? db.messages[id] : [] });
+});
+
+app.post('/api/chat/:id', async (req, res, next) => {
+  try {
+    const id = cleanText(req.params.id, 80);
+    const text = cleanText(req.body?.text, 2000);
+    if (!text) return res.status(400).json({ error: 'Mensagem vazia.' });
+    if (!canAccessThread(req, id)) return res.status(403).json({ error: 'Sem acesso a essa conversa.' });
+
+    const auth = getAuthUser(req);
+    const from = auth?.role === 'admin' ? 'admin' : 'client';
+    if (!db.threads.some((thread) => thread.id === id) && from === 'client') {
+      const isGuest = !auth;
+      db.threads.push({ id, name: isGuest ? 'Visitante ' + id.slice(-4) : db.users[id]?.name || id, kind: isGuest ? 'guest' : 'client' });
+    }
+
+    const message = { from, text, ts: Date.now() };
+    db.messages[id] = Array.isArray(db.messages[id]) ? db.messages[id] : [];
+    db.messages[id].push(message);
+    await saveDB();
+
+    io.to('thread:' + id).emit('newMessage', { threadId: id, message });
+    io.to('admin').emit('threadUpdated', { id });
+    res.json({ ok: true, message });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/threads', (req, res) => {
+  const auth = getAuthUser(req);
+  if (!auth || auth.role !== 'admin') return res.status(403).json({ error: 'Somente admin.' });
+  const threads = db.threads.map((thread) => {
+    const messages = Array.isArray(db.messages[thread.id]) ? db.messages[thread.id] : [];
+    const last = messages.length ? messages[messages.length - 1] : null;
+    const liveName = thread.kind === 'client' && db.users[thread.id] ? db.users[thread.id].name : thread.name;
+    return { id: thread.id, name: liveName, kind: thread.kind, last };
+  }).sort((a, b) => (b.last?.ts || 0) - (a.last?.ts || 0));
+  res.json({ threads });
+});
+
+/* ---------------- socket.io (chat em tempo real) ---------------- */
+io.use((socket, next) => {
+  socket.data.identity = getSocketIdentity(socket);
+  next();
+});
+
+io.on('connection', (socket) => {
+  socket.on('join-thread', (threadId) => {
+    const id = cleanText(threadId, 80);
+    if (id && canSocketAccess(socket, id)) socket.join('thread:' + id);
+  });
+  socket.on('join-admin', () => {
+    if (socket.data.identity.auth?.role === 'admin') socket.join('admin');
+  });
+});
+
+/* ---------------- respostas de erro e fallback SPA ---------------- */
+app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
+app.use((error, req, res, next) => {
+  console.error('Erro interno:', error);
+  if (res.headersSent) return next(error);
+  if (req.path.startsWith('/api')) return res.status(500).json({ error: 'Erro interno do servidor.' });
+  res.status(500).send('Erro interno do servidor.');
+});
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+async function start(port = PORT) {
+  if (!bootstrapPromise) bootstrapPromise = ensureAdmin();
+  await bootstrapPromise;
+  return new Promise((resolve) => {
+    if (server.listening) return resolve(server.address());
+    server.listen(port, () => {
+      console.log('021 TV rodando na porta ' + server.address().port);
+      resolve(server.address());
+    });
+  });
+}
+
+async function stop() {
+  if (!server.listening) return;
+  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+if (require.main === module) {
+  start().catch((error) => {
+    console.error(error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { app, server, start, stop };
