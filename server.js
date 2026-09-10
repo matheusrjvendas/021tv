@@ -15,6 +15,7 @@ const JWT_SECRET = process.env.JWT_SECRET || (IS_PRODUCTION ? null : 'dev-only-s
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (IS_PRODUCTION ? null : 'admin021');
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DB_PATH = path.join(DATA_DIR, 'db.json');
+const AUTO_REPLY_TEXT = 'Recebemos sua mensagem. Dentro de alguns minutos, um atendente humano irá conversar com você.';
 
 if (!JWT_SECRET) throw new Error('JWT_SECRET precisa ser definido em produção.');
 if (!ADMIN_PASSWORD) throw new Error('ADMIN_PASSWORD precisa ser definido em produção.');
@@ -233,7 +234,7 @@ app.post('/api/auth/signup', async (req, res, next) => {
     const history = guestId && Array.isArray(db.messages[guestId]) ? db.messages[guestId].slice() : [];
     history.push({
       from: 'admin',
-      text: `Olá, ${input.name}! Bem-vindo(a) à 021 TV. Qualquer dúvida sobre planos ou canais, é só chamar por aqui.`,
+      text: `Olá, ${input.name}! Bem-vindo(a) à 021 TV. Recebemos seu contato e, dentro de alguns minutos, um atendente humano irá conversar com você.`,
       ts: Date.now(),
     });
     db.messages[input.username] = history;
@@ -310,12 +311,16 @@ app.post('/api/chat/:id', async (req, res, next) => {
     const message = { from, text, ts: Date.now() };
     db.messages[id] = Array.isArray(db.messages[id]) ? db.messages[id] : [];
     db.messages[id].push(message);
+    const shouldAutoReply = from === 'client' && !db.messages[id].some((item) => item.from === 'admin');
+    const autoReply = shouldAutoReply ? { from: 'admin', text: AUTO_REPLY_TEXT, ts: Date.now() + 1 } : null;
+    if (autoReply) db.messages[id].push(autoReply);
     touchThread(id, { status: 'open' });
     await saveDB();
 
     io.to('thread:' + id).emit('newMessage', { threadId: id, message });
+    if (autoReply) io.to('thread:' + id).emit('newMessage', { threadId: id, message: autoReply });
     io.to('admin').emit('threadUpdated', { id });
-    res.json({ ok: true, message });
+    res.json({ ok: true, message, autoReply });
   } catch (error) {
     next(error);
   }

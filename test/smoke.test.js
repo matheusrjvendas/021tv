@@ -76,6 +76,7 @@ test('fluxo completo de visitante, cadastro, login e chat do admin', async () =>
     body: JSON.stringify({ text: 'Olá, quero conhecer os planos.' }),
   }, clientCookies);
   assert.equal(result.response.status, 200);
+  assert.equal(result.data.autoReply.text, 'Recebemos sua mensagem. Dentro de alguns minutos, um atendente humano irá conversar com você.');
 
   result = await request('/api/auth/signup', {
     method: 'POST',

@@ -204,6 +204,18 @@
   .status-pill{display:inline-block;font-size:12px;font-weight:700;padding:4px 10px;border-radius:999px;background:#26404a;color:var(--turq);}
 
   /* ---------- Floating chat ---------- */
+  .message-notice{
+    position:fixed;right:26px;bottom:96px;z-index:80;width:310px;max-width:calc(100vw - 40px);
+    display:flex;flex-direction:column;gap:4px;text-align:left;padding:15px 17px;
+    background:var(--surface-2);color:var(--text);border:1px solid var(--turq);border-radius:12px;
+    box-shadow:0 14px 36px rgba(0,0,0,.45);animation:notice-in .22s ease-out;
+  }
+  .message-notice strong{font-size:13.5px;color:var(--turq);}
+  .message-notice span{font-size:12.5px;line-height:1.4;color:var(--text);}
+  .message-notice small{font-size:11px;color:var(--text-muted);margin-top:3px;}
+  @keyframes notice-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  .chat-badge{position:absolute;top:-4px;right:-4px;min-width:21px;height:21px;padding:2px 5px;border-radius:999px;background:var(--turq);color:#062521;font-size:11px;line-height:17px;}
+
   .chat-fab{
     position:fixed;bottom:26px;right:26px;width:58px;height:58px;border-radius:50%;
     background:var(--coral);border:none;box-shadow:0 10px 30px rgba(255,107,74,.35);
@@ -290,6 +302,8 @@ let state = {
   chatOpen: false,
   chatError: '',
   adminError: '',
+  notice: null,
+  unreadCount: 0,
   activeClient: null,   // id (username ou guestId) selecionado no painel admin
   adminFilter: 'all',
   loading: true,
@@ -322,6 +336,46 @@ async function api(path, options) {
 
 function currentChatId() {
   return state.user ? state.user.username : state.guestId;
+}
+
+function playNotificationSound() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const context = new AudioContext();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(740, context.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(1040, context.currentTime + 0.12);
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.38);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.4);
+    oscillator.addEventListener('ended', () => context.close());
+  } catch (e) { /* áudio pode ser bloqueado pelo navegador */ }
+}
+
+function notifyIncomingMessage(message, label, threadId) {
+  playNotificationSound();
+  state.unreadCount += 1;
+  state.notice = { text: label, message: message.text, threadId };
+}
+
+function openChatFromNotice() {
+  if (state.user?.role === 'admin' && state.notice?.threadId) state.activeClient = state.notice.threadId;
+  state.chatOpen = true;
+  state.unreadCount = 0;
+  state.notice = null;
+  render();
+}
+
+function notificationHTML() {
+  if (!state.notice) return '';
+  return `<button class="message-notice" data-action="open-chat"><strong>${esc(state.notice.text)}</strong><span>${esc(state.notice.message)}</span><small>Clique para abrir a conversa</small></button>`;
 }
 
 // ---------- bootstrap ----------
@@ -363,11 +417,13 @@ function setupSocket() {
   joinSocketRooms();
 
   socket.on('newMessage', (payload) => {
-    // cliente/visitante: nova mensagem na própria conversa
-    if (state.user && state.user.role !== 'admin' && payload.threadId === state.user.username) render();
-    if (!state.user && payload.threadId === state.guestId) render();
-    // admin: nova mensagem na conversa que está olhando
-    if (state.user && state.user.role === 'admin' && payload.threadId === state.activeClient) render();
+    const isMyThread = (state.user && state.user.role !== 'admin' && payload.threadId === state.user.username) || (!state.user && payload.threadId === state.guestId);
+    const isAdmin = state.user?.role === 'admin';
+    const incoming = (isAdmin && payload.message.from === 'client') || (!isAdmin && payload.message.from === 'admin');
+    if (incoming && (isAdmin || isMyThread)) {
+      notifyIncomingMessage(payload.message, isAdmin ? 'Nova mensagem de cliente' : 'Nova resposta do suporte', payload.threadId);
+    }
+    if (isMyThread || (isAdmin && payload.threadId === state.activeClient)) render();
   });
 
   socket.on('threadUpdated', () => {
@@ -412,6 +468,8 @@ async function doLogout() {
   state.chatOpen = false;
   state.chatError = '';
   state.adminError = '';
+  state.notice = null;
+  state.unreadCount = 0;
   try {
     await api('/api/guest');
     state.guestId = getCookie('guestId');
@@ -700,7 +758,8 @@ function chatWidgetHTML(thread) {
       <div class="msg ${m.from}">${esc(m.text)}<time>${timeFmt(m.ts)}</time></div>
     `).join('');
   return `
-  <button class="chat-fab" data-action="toggle-chat">💬</button>
+  ${notificationHTML()}
+  <button class="chat-fab" data-action="toggle-chat">💬${state.unreadCount ? `<b class="chat-badge">${state.unreadCount}</b>` : ''}</button>
   ${state.chatOpen ? `
   <div class="chat-panel">
     <div class="chat-head">
@@ -718,8 +777,9 @@ function chatWidgetHTML(thread) {
 }
 
 function attachChatWidgetEvents() {
+  document.querySelectorAll('[data-action="open-chat"]').forEach(el => el.onclick = openChatFromNotice);
   document.querySelectorAll('[data-action="toggle-chat"]').forEach(el => {
-    el.onclick = () => { state.chatOpen = !state.chatOpen; render(); };
+    el.onclick = () => { state.chatOpen = !state.chatOpen; if (state.chatOpen) { state.unreadCount = 0; state.notice = null; } render(); };
   });
   const chatForm = document.getElementById('chatForm');
   if (chatForm) {
@@ -868,11 +928,13 @@ async function renderAdmin() {
     </aside>
     <section class="admin-main">${mainHTML}</section>
   </div>
+  ${notificationHTML()}
   `;
 }
 
 function attachAdminEvents() {
   document.querySelectorAll('[data-action="logout"]').forEach(el => el.onclick = doLogout);
+  document.querySelectorAll('[data-action="open-chat"]').forEach(el => el.onclick = openChatFromNotice);
   document.querySelectorAll('[data-filter]').forEach(el => {
     el.onclick = () => { state.adminFilter = el.getAttribute('data-filter'); render(); };
   });
