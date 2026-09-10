@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { Server } = require('socket.io');
+const multer = require('multer');
 
 const PORT = Number(process.env.PORT) || 3000;
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
@@ -15,6 +16,8 @@ const JWT_SECRET = process.env.JWT_SECRET || (IS_PRODUCTION ? null : 'dev-only-s
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (IS_PRODUCTION ? null : 'admin021');
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DB_PATH = path.join(DATA_DIR, 'db.json');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const AUTO_REPLY_TEXT = 'Recebemos sua mensagem. Dentro de alguns minutos, um atendente humano irá conversar com você.';
 
 if (!JWT_SECRET) throw new Error('JWT_SECRET precisa ser definido em produção.');
@@ -49,6 +52,7 @@ function normalizeDB(value) {
 
 function loadDB() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   if (!fs.existsSync(DB_PATH)) return emptyDB();
   try {
     return normalizeDB(JSON.parse(fs.readFileSync(DB_PATH, 'utf8')));
@@ -107,6 +111,11 @@ function guestCookieOptions() {
 }
 
 /* ---------------- app / http / socket.io ---------------- */
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE, files: 5 },
+});
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '20kb' }));
@@ -287,11 +296,42 @@ app.get('/api/chat/:id', (req, res) => {
   res.json({ messages: Array.isArray(db.messages[id]) ? db.messages[id] : [] });
 });
 
-app.post('/api/chat/:id', async (req, res, next) => {
+app.get('/api/chat/:id/attachments/:filename', (req, res) => {
+  const id = cleanText(req.params.id, 80);
+  const filename = cleanText(req.params.filename, 120);
+  if (!canAccessThread(req, id)) return res.status(403).json({ error: 'Sem acesso a essa conversa.' });
+  if (!/^[a-z0-9_-]+$/i.test(id)) return res.status(404).end();
+  if (!/^[a-f0-9-]+\.[a-z0-9]{1,10}$/i.test(filename)) return res.status(404).end();
+  const threadRoot = path.resolve(UPLOADS_DIR, id);
+  const filePath = path.resolve(threadRoot, filename);
+  if (!filePath.startsWith(threadRoot + path.sep) || !fs.existsSync(filePath)) return res.status(404).end();
+  res.sendFile(filePath);
+});
+
+async function saveUploadedFiles(id, files) {
+  if (!files?.length) return [];
+  const threadDir = path.join(UPLOADS_DIR, id);
+  await fs.promises.mkdir(threadDir, { recursive: true });
+  const attachments = [];
+  for (const file of files) {
+    const extension = path.extname(file.originalname || '').toLowerCase().replace(/[^a-z0-9.]/g, '').slice(0, 10) || '.bin';
+    const filename = crypto.randomUUID() + extension;
+    await fs.promises.writeFile(path.join(threadDir, filename), file.buffer);
+    attachments.push({
+      name: cleanText(file.originalname || 'arquivo', 160) || 'arquivo',
+      mimeType: file.mimetype || 'application/octet-stream',
+      size: file.size,
+      url: `/api/chat/${encodeURIComponent(id)}/attachments/${filename}`,
+    });
+  }
+  return attachments;
+}
+
+app.post('/api/chat/:id', upload.array('files', 5), async (req, res, next) => {
   try {
     const id = cleanText(req.params.id, 80);
     const text = cleanText(req.body?.text, 2000);
-    if (!text) return res.status(400).json({ error: 'Mensagem vazia.' });
+    if (!text && !req.files?.length) return res.status(400).json({ error: 'Escreva uma mensagem ou selecione um arquivo.' });
     if (!canAccessThread(req, id)) return res.status(403).json({ error: 'Sem acesso a essa conversa.' });
 
     const auth = getAuthUser(req);
@@ -308,7 +348,8 @@ app.post('/api/chat/:id', async (req, res, next) => {
       });
     }
 
-    const message = { from, text, ts: Date.now() };
+    const attachments = await saveUploadedFiles(id, req.files);
+    const message = { from, text, attachments, ts: Date.now() };
     db.messages[id] = Array.isArray(db.messages[id]) ? db.messages[id] : [];
     db.messages[id].push(message);
     const shouldAutoReply = from === 'client' && !db.messages[id].some((item) => item.from === 'admin');
@@ -377,6 +418,10 @@ io.on('connection', (socket) => {
 /* ---------------- respostas de erro e fallback SPA ---------------- */
 app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
 app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    const message = error.code === 'LIMIT_FILE_SIZE' ? 'Cada arquivo pode ter no máximo 10 MB.' : error.code === 'LIMIT_FILE_COUNT' ? 'Envie no máximo 5 arquivos por mensagem.' : 'Não foi possível receber os arquivos.';
+    return res.status(400).json({ error: message });
+  }
   console.error('Erro interno:', error);
   if (res.headersSent) return next(error);
   if (req.path.startsWith('/api')) return res.status(500).json({ error: 'Erro interno do servidor.' });

@@ -4,7 +4,7 @@ Aplicação Node.js com site público, cadastro de clientes, login administrativ
 
 ## O que foi preparado
 
-O fluxo de visitante, cadastro e chat agora funciona em conjunto: uma conversa iniciada antes do cadastro é migrada para o usuário recém-criado; o cliente pode continuar consultando o histórico; e o administrador pode responder pelo painel. Todas as conversas ficam persistidas no histórico do administrador, mesmo quando ele está offline. Cada conversa pode ser filtrada como aberta, fechada ou arquivada; conversas fechadas e arquivadas continuam disponíveis para leitura e resposta, e podem ser reabertas. A primeira mensagem do cliente recebe uma resposta automática informando que um atendente humano irá conversar em alguns minutos. Quando chega uma mensagem nova, o destinatário recebe um alerta visual no site, contador no botão do chat e um som curto; clicar no alerta abre a conversa correspondente. O servidor também valida os dados recebidos, limita o tamanho das mensagens, protege as salas do Socket.io, oferece `/healthz` para o Render e grava o JSON com escrita atômica para reduzir o risco de arquivo corrompido.
+O fluxo de visitante, cadastro e chat agora funciona em conjunto: uma conversa iniciada antes do cadastro é migrada para o usuário recém-criado; o cliente pode continuar consultando o histórico; e o administrador pode responder pelo painel. Todas as conversas ficam persistidas no histórico do administrador, mesmo quando ele está offline. Cada conversa pode ser filtrada como aberta, fechada ou arquivada; conversas fechadas e arquivadas continuam disponíveis para leitura e resposta, e podem ser reabertas. A primeira mensagem do cliente recebe uma resposta automática informando que um atendente humano irá conversar em alguns minutos. Quando chega uma mensagem nova, o destinatário recebe um alerta visual no site, contador no botão do chat e um som curto; clicar no alerta abre a conversa correspondente. O chat também aceita imagens e arquivos de até 10 MB, com até cinco anexos por mensagem. No celular, o botão de câmera abre a câmera do aparelho quando o navegador oferece esse recurso; no computador, o mesmo botão abre o seletor de imagens. Os anexos são gravados em `DATA_DIR/uploads` e protegidos pelas mesmas permissões da conversa. O servidor também valida os dados recebidos, protege as salas do Socket.io, oferece `/healthz` e grava o JSON com escrita atômica para reduzir o risco de arquivo corrompido.
 
 ## Execução local
 
@@ -23,7 +23,7 @@ Para executar os testes automatizados:
 npm test
 ```
 
-Os testes cobrem o health check, criação do visitante, envio de mensagem, cadastro com migração do histórico, login do administrador, listagem de conversas, fechamento, arquivamento, reabertura e resposta do admin.
+Os testes cobrem o health check, criação do visitante, envio de mensagem e imagem, cadastro com migração do histórico, login do administrador, leitura autorizada de anexos, listagem de conversas, fechamento, arquivamento, reabertura e resposta do admin.
 
 ## Deploy no Render
 

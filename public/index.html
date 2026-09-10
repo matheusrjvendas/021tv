@@ -242,6 +242,13 @@
   }
   .chat-input input:focus{outline:none;border-color:var(--turq);}
   .chat-input button{background:var(--turq);border:none;color:#062521;border-radius:50%;width:38px;height:38px;font-weight:800;flex:none;}
+  .attach-btn{position:relative;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--line);border-radius:50%;color:var(--text-muted);cursor:pointer;flex:none;}
+  .attach-btn:hover{border-color:var(--turq);color:var(--turq);}
+  .attach-btn input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;}
+  .attachment-image{display:flex;flex-direction:column;gap:4px;margin:6px 0;color:inherit;text-decoration:none;}
+  .attachment-image img{max-width:190px;max-height:150px;border-radius:8px;object-fit:cover;border:1px solid var(--line);}
+  .attachment-image span,.attachment-file{font-size:11.5px;word-break:break-word;}
+  .attachment-file{display:block;margin:5px 0;color:var(--turq);text-decoration:underline;}
 
   /* ---------- Admin dashboard ---------- */
   .admin-shell{display:grid;grid-template-columns:290px 1fr;min-height:calc(100vh - 65px);}
@@ -325,9 +332,10 @@ function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 async function api(path, options) {
-  const res = await fetch(path, Object.assign({
-    headers: { 'Content-Type': 'application/json' },
-  }, options || {}));
+  const requestOptions = Object.assign({}, options || {});
+  const isFormData = requestOptions.body instanceof FormData;
+  requestOptions.headers = Object.assign(isFormData ? {} : { 'Content-Type': 'application/json' }, requestOptions.headers || {});
+  const res = await fetch(path, requestOptions);
   let data = {};
   try { data = await res.json(); } catch (e) { /* resposta vazia */ }
   if (!res.ok) throw new Error(data.error || 'Erro na requisição.');
@@ -479,23 +487,29 @@ async function doLogout() {
 }
 
 // ---------- ações de chat ----------
-async function sendVisitorMessage(text) {
+async function sendVisitorMessage(text, files = []) {
   const id = currentChatId();
-  if (!text || !text.trim() || !id) return;
+  if ((!text || !text.trim()) && !files.length || !id) return;
   state.chatError = '';
   try {
-    await api('/api/chat/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ text }) });
+    const body = new FormData();
+    if (text && text.trim()) body.append('text', text.trim());
+    files.forEach((file) => body.append('files', file));
+    await api('/api/chat/' + encodeURIComponent(id), { method: 'POST', body });
   } catch (e) {
     state.chatError = e.message;
   }
   render();
 }
 
-async function sendAdminMessage(id, text) {
-  if (!text || !text.trim() || !id) return;
+async function sendAdminMessage(id, text, files = []) {
+  if ((!text || !text.trim()) && !files.length || !id) return;
   state.adminError = '';
   try {
-    await api('/api/chat/' + encodeURIComponent(id), { method: 'POST', body: JSON.stringify({ text }) });
+    const body = new FormData();
+    if (text && text.trim()) body.append('text', text.trim());
+    files.forEach((file) => body.append('files', file));
+    await api('/api/chat/' + encodeURIComponent(id), { method: 'POST', body });
   } catch (e) {
     state.adminError = e.message;
   }
@@ -753,9 +767,18 @@ function signupFormHTML() {
 }
 
 // ---------- widget de chat (visitante e cliente usam o mesmo) ----------
+function attachmentHTML(attachments) {
+  return (attachments || []).map((file) => {
+    const isImage = /^image\//.test(file.mimeType || '');
+    return isImage
+      ? `<a class="attachment-image" href="${esc(file.url)}" target="_blank" rel="noopener"><img src="${esc(file.url)}" alt="${esc(file.name)}" loading="lazy"><span>${esc(file.name)}</span></a>`
+      : `<a class="attachment-file" href="${esc(file.url)}" target="_blank" rel="noopener">📎 ${esc(file.name)} <small>(${Math.ceil((file.size || 0) / 1024)} KB)</small></a>`;
+  }).join('');
+}
+
 function chatWidgetHTML(thread) {
   const msgsHTML = thread.map(m => `
-      <div class="msg ${m.from}">${esc(m.text)}<time>${timeFmt(m.ts)}</time></div>
+      <div class="msg ${m.from}">${m.text ? esc(m.text) : ''}${attachmentHTML(m.attachments)}<time>${timeFmt(m.ts)}</time></div>
     `).join('');
   return `
   ${notificationHTML()}
@@ -769,7 +792,9 @@ function chatWidgetHTML(thread) {
     <div class="chat-body" id="chatBody">${msgsHTML || '<div style="color:var(--text-muted);font-size:13px;">Nenhuma mensagem ainda. Manda um oi 👋</div>'}</div>
     ${state.chatError ? `<div class="err" style="padding:0 12px 8px;">${esc(state.chatError)}</div>` : ''}
     <form class="chat-input" id="chatForm">
-      <input name="text" placeholder="Escreva sua mensagem..." autocomplete="off" required>
+      <input name="text" placeholder="Escreva sua mensagem..." autocomplete="off">
+      <label class="attach-btn" title="Anexar arquivos">📎<input name="files" type="file" multiple accept="image/*,.pdf,.doc,.docx,.txt,.zip"></label>
+      <label class="attach-btn" title="Tirar foto">📷<input name="files" type="file" accept="image/*" capture="environment"></label>
       <button type="submit">➤</button>
     </form>
   </div>` : ''}
@@ -787,8 +812,9 @@ function attachChatWidgetEvents() {
       e.preventDefault();
       const fd = new FormData(chatForm);
       const text = fd.get('text');
+      const files = fd.getAll('files').filter((file) => file && file.size);
       chatForm.reset();
-      sendVisitorMessage(text);
+      sendVisitorMessage(text, files);
     };
     const body = document.getElementById('chatBody');
     if (body) body.scrollTop = body.scrollHeight;
@@ -891,7 +917,7 @@ async function renderAdmin() {
     const activeInfo = allThreads.find(c => c.id === state.activeClient);
     let chat = [];
     try { chat = (await api('/api/chat/' + encodeURIComponent(state.activeClient))).messages || []; } catch (e) { state.adminError = e.message; }
-    const msgsHTML = chat.map(m => `<div class="msg ${m.from === 'admin' ? 'admin' : 'client'}" style="align-self:${m.from === 'admin' ? 'flex-start' : 'flex-end'}">${esc(m.text)}<time>${timeFmt(m.ts)}</time></div>`).join('');
+    const msgsHTML = chat.map(m => `<div class="msg ${m.from === 'admin' ? 'admin' : 'client'}" style="align-self:${m.from === 'admin' ? 'flex-start' : 'flex-end'}">${m.text ? esc(m.text) : ''}${attachmentHTML(m.attachments)}<time>${timeFmt(m.ts)}</time></div>`).join('');
     const status = activeInfo?.status || 'open';
     const statusActions = status === 'open'
       ? `<button class="btn btn-ghost btn-sm" data-status="closed">Fechar conversa</button><button class="btn btn-ghost btn-sm" data-status="archived">Arquivar</button>`
@@ -904,7 +930,9 @@ async function renderAdmin() {
       <div class="thread-body" id="adminThreadBody">${msgsHTML || '<div style="color:var(--text-muted);font-size:13px;">Nenhuma mensagem ainda.</div>'}</div>
       ${state.adminError ? `<div class="err" style="padding:0 24px 8px;">${esc(state.adminError)}</div>` : ''}
       <form class="thread-input" id="adminChatForm">
-        <input name="text" placeholder="Responder..." autocomplete="off" required>
+        <input name="text" placeholder="Responder..." autocomplete="off">
+        <label class="attach-btn" title="Anexar arquivos">📎<input name="files" type="file" multiple accept="image/*,.pdf,.doc,.docx,.txt,.zip"></label>
+        <label class="attach-btn" title="Tirar foto">📷<input name="files" type="file" accept="image/*" capture="environment"></label>
         <button class="btn btn-solid btn-sm" type="submit">Enviar</button>
       </form>`;
     if (socket) socket.emit('join-thread', state.activeClient);
@@ -950,8 +978,9 @@ function attachAdminEvents() {
       e.preventDefault();
       const fd = new FormData(form);
       const text = fd.get('text');
+      const files = fd.getAll('files').filter((file) => file && file.size);
       form.reset();
-      sendAdminMessage(state.activeClient, text);
+      sendAdminMessage(state.activeClient, text, files);
     };
     const body = document.getElementById('adminThreadBody');
     if (body) body.scrollTop = body.scrollHeight;

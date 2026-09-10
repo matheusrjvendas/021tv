@@ -78,6 +78,17 @@ test('fluxo completo de visitante, cadastro, login e chat do admin', async () =>
   assert.equal(result.response.status, 200);
   assert.equal(result.data.autoReply.text, 'Recebemos sua mensagem. Dentro de alguns minutos, um atendente humano irá conversar com você.');
 
+  const attachmentForm = new FormData();
+  attachmentForm.append('text', 'Segue uma foto para ajudar no atendimento.');
+  attachmentForm.append('files', new Blob(['fake-image-content'], { type: 'image/jpeg' }), 'foto-teste.jpg');
+  result = await request(`/api/chat/${encodeURIComponent(guestId)}`, {
+    method: 'POST',
+    body: attachmentForm,
+  }, clientCookies);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.message.attachments[0].name, 'foto-teste.jpg');
+  assert.equal(result.data.message.attachments[0].mimeType, 'image/jpeg');
+
   result = await request('/api/auth/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -111,6 +122,14 @@ test('fluxo completo de visitante, cadastro, login e chat do admin', async () =>
   assert.equal(result.response.status, 200);
   assert.equal(result.data.threads.some((thread) => thread.id === clientUsername), true);
   assert.equal(result.data.threads.find((thread) => thread.id === clientUsername).status, 'open');
+
+  const storedImageUrl = result = await request(`/api/chat/${clientUsername}`, {}, adminCookies);
+  assert.equal(storedImageUrl.response.status, 200);
+  const storedAttachment = storedImageUrl.data.messages.find((message) => message.attachments?.length)?.attachments[0];
+  assert.ok(storedAttachment);
+  const imageResponse = await fetch(baseUrl + storedAttachment.url, { headers: { Cookie: adminCookies } });
+  assert.equal(imageResponse.status, 200);
+  assert.equal(await imageResponse.text(), 'fake-image-content');
 
   result = await request(`/api/threads/${clientUsername}/status`, {
     method: 'PATCH',
