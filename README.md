@@ -4,7 +4,7 @@ Aplicação Node.js com site público, cadastro de clientes, login administrativ
 
 ## O que foi preparado
 
-O fluxo de visitante, cadastro e chat agora funciona em conjunto: uma conversa iniciada antes do cadastro é migrada para o usuário recém-criado; o cliente pode continuar consultando o histórico; e o administrador pode responder pelo painel. O servidor também valida os dados recebidos, limita o tamanho das mensagens, protege as salas do Socket.io, oferece `/healthz` para o Render e grava o JSON com escrita atômica para reduzir o risco de arquivo corrompido.
+O fluxo de visitante, cadastro e chat agora funciona em conjunto: uma conversa iniciada antes do cadastro é migrada para o usuário recém-criado; o cliente pode continuar consultando o histórico; e o administrador pode responder pelo painel. Todas as conversas ficam persistidas no histórico do administrador, mesmo quando ele está offline. Cada conversa pode ser filtrada como aberta, fechada ou arquivada; conversas fechadas e arquivadas continuam disponíveis para leitura e resposta, e podem ser reabertas. O servidor também valida os dados recebidos, limita o tamanho das mensagens, protege as salas do Socket.io, oferece `/healthz` para o Render e grava o JSON com escrita atômica para reduzir o risco de arquivo corrompido.
 
 ## Execução local
 
@@ -23,7 +23,7 @@ Para executar os testes automatizados:
 npm test
 ```
 
-Os testes cobrem o health check, criação do visitante, envio de mensagem, cadastro com migração do histórico, login do administrador, listagem de conversas e resposta do admin.
+Os testes cobrem o health check, criação do visitante, envio de mensagem, cadastro com migração do histórico, login do administrador, listagem de conversas, fechamento, arquivamento, reabertura e resposta do admin.
 
 ## Deploy no Render
 

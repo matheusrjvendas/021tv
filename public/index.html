@@ -242,6 +242,10 @@
   .client-item.active{background:var(--surface-2);}
   .client-item .name{font-weight:700;font-size:14px;}
   .client-item .preview{font-size:12.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .thread-status{font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:800;margin-right:4px;}
+  .thread-status.open{color:var(--turq);}
+  .thread-status.closed{color:#f2c66d;}
+  .thread-status.archived{color:#8799a3;}
   .admin-main{display:flex;flex-direction:column;height:calc(100vh - 65px);}
   .admin-main .thread-head{padding:18px 24px;border-bottom:1px solid var(--line);}
   .admin-main .thread-head h3{margin:0;font-size:17px;}
@@ -287,6 +291,7 @@ let state = {
   chatError: '',
   adminError: '',
   activeClient: null,   // id (username ou guestId) selecionado no painel admin
+  adminFilter: 'all',
   loading: true,
 };
 
@@ -437,6 +442,24 @@ async function sendAdminMessage(id, text) {
     state.adminError = e.message;
   }
   render();
+}
+
+async function changeThreadStatus(id, status) {
+  if (!id) return;
+  state.adminError = '';
+  try {
+    await api('/api/threads/' + encodeURIComponent(id) + '/status', {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    });
+  } catch (e) {
+    state.adminError = e.message;
+  }
+  render();
+}
+
+function statusText(status) {
+  return { open: 'aberta', closed: 'fechada', archived: 'arquivada' }[status] || 'aberta';
 }
 
 async function requestPlan(planName, planPrice) {
@@ -785,29 +808,38 @@ function attachClientEvents() {
 
 // ---------- ADMIN DASHBOARD ----------
 async function renderAdmin() {
-  let list = [];
-  try { list = (await api('/api/threads')).threads || []; } catch (e) {}
+  let allThreads = [];
+  try { allThreads = (await api('/api/threads')).threads || []; } catch (e) { state.adminError = e.message; }
+  const list = state.adminFilter === 'all' ? allThreads : allThreads.filter((thread) => thread.status === state.adminFilter);
 
-  if (!state.activeClient && list.length) state.activeClient = list[0].id;
+  if (!list.some((thread) => thread.id === state.activeClient)) state.activeClient = list.length ? list[0].id : null;
+
+  const filterButtons = ['all', 'open', 'closed', 'archived'].map((filter) => `
+    <button class="btn btn-sm ${state.adminFilter === filter ? 'btn-turq' : 'btn-ghost'}" data-filter="${filter}">${filter === 'all' ? 'Todas' : filter === 'open' ? 'Abertas' : filter === 'closed' ? 'Fechadas' : 'Arquivadas'}</button>
+  `).join('');
 
   const sideHTML = list.length
     ? list.map(c => `
         <div class="client-item ${state.activeClient === c.id ? 'active' : ''}" data-client="${esc(c.id)}">
           <div class="name">${esc(c.name)} ${c.kind === 'guest' ? '<span style="font-size:10px;color:var(--text-muted);font-weight:600;">· visitante</span>' : ''}</div>
-          <div class="preview">${c.last ? esc(c.last.text) : 'sem mensagens'}</div>
+          <div class="preview"><span class="thread-status ${c.status}">${statusText(c.status)}</span> ${c.last ? esc(c.last.text) : 'sem mensagens'}</div>
         </div>`).join('')
-    : `<div style="color:var(--text-muted);font-size:13px;padding:12px;">Nenhuma conversa ainda.</div>`;
+    : `<div style="color:var(--text-muted);font-size:13px;padding:12px;">Nenhuma conversa nesta categoria.</div>`;
 
   let mainHTML = `<div class="empty-state">Selecione uma conversa pra ver o histórico.</div>`;
   if (state.activeClient) {
-    const activeInfo = list.find(c => c.id === state.activeClient);
+    const activeInfo = allThreads.find(c => c.id === state.activeClient);
     let chat = [];
-    try { chat = (await api('/api/chat/' + encodeURIComponent(state.activeClient))).messages || []; } catch (e) {}
+    try { chat = (await api('/api/chat/' + encodeURIComponent(state.activeClient))).messages || []; } catch (e) { state.adminError = e.message; }
     const msgsHTML = chat.map(m => `<div class="msg ${m.from === 'admin' ? 'admin' : 'client'}" style="align-self:${m.from === 'admin' ? 'flex-start' : 'flex-end'}">${esc(m.text)}<time>${timeFmt(m.ts)}</time></div>`).join('');
+    const status = activeInfo?.status || 'open';
+    const statusActions = status === 'open'
+      ? `<button class="btn btn-ghost btn-sm" data-status="closed">Fechar conversa</button><button class="btn btn-ghost btn-sm" data-status="archived">Arquivar</button>`
+      : `<button class="btn btn-turq btn-sm" data-status="open">Reabrir conversa</button>`;
     mainHTML = `
       <div class="thread-head">
-        <h3>${esc(activeInfo ? activeInfo.name : state.activeClient)}</h3>
-        <span>${activeInfo && activeInfo.kind === 'guest' ? 'Visitante (ainda não cadastrado)' : '@' + esc(state.activeClient)}</span>
+        <div><h3>${esc(activeInfo ? activeInfo.name : state.activeClient)}</h3><span>${activeInfo && activeInfo.kind === 'guest' ? 'Visitante (ainda não cadastrado)' : '@' + esc(state.activeClient)} · conversa ${statusText(status)}</span></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">${statusActions}</div>
       </div>
       <div class="thread-body" id="adminThreadBody">${msgsHTML || '<div style="color:var(--text-muted);font-size:13px;">Nenhuma mensagem ainda.</div>'}</div>
       ${state.adminError ? `<div class="err" style="padding:0 24px 8px;">${esc(state.adminError)}</div>` : ''}
@@ -830,7 +862,8 @@ async function renderAdmin() {
   </header>
   <div class="admin-shell">
     <aside class="admin-side">
-      <h2>Conversas (${list.length})</h2>
+      <h2>Histórico (${allThreads.length})</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">${filterButtons}</div>
       ${sideHTML}
     </aside>
     <section class="admin-main">${mainHTML}</section>
@@ -840,8 +873,14 @@ async function renderAdmin() {
 
 function attachAdminEvents() {
   document.querySelectorAll('[data-action="logout"]').forEach(el => el.onclick = doLogout);
+  document.querySelectorAll('[data-filter]').forEach(el => {
+    el.onclick = () => { state.adminFilter = el.getAttribute('data-filter'); render(); };
+  });
   document.querySelectorAll('[data-client]').forEach(el => {
     el.onclick = () => { state.activeClient = el.getAttribute('data-client'); render(); };
+  });
+  document.querySelectorAll('[data-status]').forEach(el => {
+    el.onclick = () => changeThreadStatus(state.activeClient, el.getAttribute('data-status'));
   });
   const form = document.getElementById('adminChatForm');
   if (form) {

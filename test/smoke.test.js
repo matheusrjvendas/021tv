@@ -109,6 +109,38 @@ test('fluxo completo de visitante, cadastro, login e chat do admin', async () =>
   result = await request('/api/threads', {}, adminCookies);
   assert.equal(result.response.status, 200);
   assert.equal(result.data.threads.some((thread) => thread.id === clientUsername), true);
+  assert.equal(result.data.threads.find((thread) => thread.id === clientUsername).status, 'open');
+
+  result = await request(`/api/threads/${clientUsername}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'closed' }),
+  }, adminCookies);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.thread.status, 'closed');
+
+  result = await request('/api/threads', {}, adminCookies);
+  assert.equal(result.data.threads.find((thread) => thread.id === clientUsername).status, 'closed');
+
+  result = await request(`/api/threads/${clientUsername}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'archived' }),
+  }, adminCookies);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.thread.status, 'archived');
+
+  result = await request(`/api/chat/${clientUsername}`, {}, adminCookies);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.messages.some((message) => message.text.includes('conhecer os planos')), true);
+
+  result = await request(`/api/threads/${clientUsername}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'open' }),
+  }, adminCookies);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.data.thread.status, 'open');
 
   result = await request(`/api/chat/${clientUsername}`, {
     method: 'POST',
@@ -143,6 +175,13 @@ test('fluxo completo de visitante, cadastro, login e chat do admin', async () =>
   result = await request(`/api/chat/${clientUsername}`, {}, clientCookies);
   assert.equal(result.response.status, 200);
   assert.equal(result.data.messages.at(-1).text, 'Mensagem em tempo real.');
+
+  result = await request(`/api/threads/${clientUsername}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'closed' }),
+  }, clientCookies);
+  assert.equal(result.response.status, 403);
 });
 
 test('cadastro rejeita dados inválidos e usuário duplicado', async () => {

@@ -23,11 +23,25 @@ function emptyDB() {
   return { users: {}, threads: [], messages: {} };
 }
 
+function normalizeThread(thread) {
+  const source = thread && typeof thread === 'object' ? thread : {};
+  const status = ['open', 'closed', 'archived'].includes(source.status) ? source.status : 'open';
+  return {
+    ...source,
+    id: String(source.id || ''),
+    name: String(source.name || source.id || 'Conversa'),
+    kind: source.kind === 'guest' ? 'guest' : 'client',
+    status,
+    createdAt: Number(source.createdAt) || Date.now(),
+    updatedAt: Number(source.updatedAt) || Number(source.createdAt) || Date.now(),
+  };
+}
+
 function normalizeDB(value) {
   const source = value && typeof value === 'object' ? value : {};
   return {
     users: source.users && typeof source.users === 'object' ? source.users : {},
-    threads: Array.isArray(source.threads) ? source.threads : [],
+    threads: Array.isArray(source.threads) ? source.threads.map(normalizeThread).filter((thread) => thread.id) : [],
     messages: source.messages && typeof source.messages === 'object' ? source.messages : {},
   };
 }
@@ -129,6 +143,17 @@ function cleanText(value, maxLength) {
   return typeof value === 'string' ? value.trim().slice(0, maxLength) : '';
 }
 
+function getThread(id) {
+  return db.threads.find((thread) => thread.id === id);
+}
+
+function touchThread(id, changes = {}) {
+  const thread = getThread(id);
+  if (!thread) return null;
+  Object.assign(thread, changes, { updatedAt: Date.now() });
+  return thread;
+}
+
 function validateSignup(body) {
   const name = cleanText(body?.name, 80);
   const username = cleanText(body?.username, 24).toLowerCase();
@@ -201,7 +226,7 @@ app.post('/api/auth/signup', async (req, res, next) => {
     };
 
     if (!db.threads.some((thread) => thread.id === input.username)) {
-      db.threads.push({ id: input.username, name: input.name, kind: 'client' });
+      db.threads.push({ id: input.username, name: input.name, kind: 'client', status: 'open', createdAt: Date.now(), updatedAt: Date.now() });
     }
 
     const guestId = req.cookies?.guestId;
@@ -218,6 +243,7 @@ app.post('/api/auth/signup', async (req, res, next) => {
       db.threads = db.threads.filter((thread) => thread.id !== guestId);
     }
 
+    touchThread(input.username, { status: 'open' });
     await saveDB();
     res.cookie('token', signToken({ username: input.username, role: 'client' }), cookieOptions(1000 * 60 * 60 * 24 * 30));
     res.json({ username: input.username, name: input.name, role: 'client' });
@@ -271,12 +297,20 @@ app.post('/api/chat/:id', async (req, res, next) => {
     const from = auth?.role === 'admin' ? 'admin' : 'client';
     if (!db.threads.some((thread) => thread.id === id) && from === 'client') {
       const isGuest = !auth;
-      db.threads.push({ id, name: isGuest ? 'Visitante ' + id.slice(-4) : db.users[id]?.name || id, kind: isGuest ? 'guest' : 'client' });
+      db.threads.push({
+        id,
+        name: isGuest ? 'Visitante ' + id.slice(-4) : db.users[id]?.name || id,
+        kind: isGuest ? 'guest' : 'client',
+        status: 'open',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
     }
 
     const message = { from, text, ts: Date.now() };
     db.messages[id] = Array.isArray(db.messages[id]) ? db.messages[id] : [];
     db.messages[id].push(message);
+    touchThread(id, { status: 'open' });
     await saveDB();
 
     io.to('thread:' + id).emit('newMessage', { threadId: id, message });
@@ -294,9 +328,29 @@ app.get('/api/threads', (req, res) => {
     const messages = Array.isArray(db.messages[thread.id]) ? db.messages[thread.id] : [];
     const last = messages.length ? messages[messages.length - 1] : null;
     const liveName = thread.kind === 'client' && db.users[thread.id] ? db.users[thread.id].name : thread.name;
-    return { id: thread.id, name: liveName, kind: thread.kind, last };
-  }).sort((a, b) => (b.last?.ts || 0) - (a.last?.ts || 0));
+    return { id: thread.id, name: liveName, kind: thread.kind, status: thread.status || 'open', updatedAt: thread.updatedAt || last?.ts || 0, last };
+  }).sort((a, b) => b.updatedAt - a.updatedAt);
   res.json({ threads });
+});
+
+app.patch('/api/threads/:id/status', async (req, res, next) => {
+  try {
+    const auth = getAuthUser(req);
+    if (!auth || auth.role !== 'admin') return res.status(403).json({ error: 'Somente admin.' });
+    const id = cleanText(req.params.id, 80);
+    const status = cleanText(req.body?.status, 20);
+    if (!['open', 'closed', 'archived'].includes(status)) return res.status(400).json({ error: 'Status inválido.' });
+    const thread = touchThread(id, { status });
+    if (!thread) return res.status(404).json({ error: 'Conversa não encontrada.' });
+    if (status === 'closed') thread.closedAt = Date.now();
+    if (status === 'archived') thread.archivedAt = Date.now();
+    await saveDB();
+    io.to('admin').emit('threadUpdated', { id });
+    io.to('thread:' + id).emit('threadStatusChanged', { threadId: id, status });
+    res.json({ ok: true, thread: { id: thread.id, status: thread.status } });
+  } catch (error) {
+    next(error);
+  }
 });
 
 /* ---------------- socket.io (chat em tempo real) ---------------- */
